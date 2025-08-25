@@ -1,4 +1,4 @@
-;; QuestBoard Smart Contract - Commit 2: Quest Participation and Completion
+;; QuestBoard Smart Contract - Commit 4: Administrative Functions and SIP-009 Compliance
 ;; A community board for game developers to post quests and reward players with NFT badges
 
 ;; Define SIP-009 NFT trait locally
@@ -54,6 +54,11 @@
 (define-map quest-participants 
   {quest-id: uint, player: principal}
   {completed: bool, completion-block: uint}
+)
+
+(define-map player-badges
+  principal
+  {total-badges: uint, last-badge-id: uint}
 )
 
 ;; public functions
@@ -121,6 +126,8 @@
       (quest (unwrap! (map-get? quests quest-id) ERR-QUEST-NOT-FOUND))
       (participant-key {quest-id: quest-id, player: player})
       (participant (unwrap! (map-get? quest-participants participant-key) ERR-QUEST-NOT-FOUND))
+      (badge-id (+ (var-get badge-counter) u1))
+      (player-stats (default-to {total-badges: u0, last-badge-id: u0} (map-get? player-badges player)))
     )
     (asserts! (or (is-eq tx-sender (get creator quest)) (is-eq tx-sender CONTRACT-OWNER)) ERR-UNAUTHORIZED)
     (asserts! (get is-active quest) ERR-QUEST-INACTIVE)
@@ -133,7 +140,19 @@
       completion-block: burn-block-height
     })
     
-    (ok true)
+    ;; Mint NFT badge to player
+    (try! (nft-mint? quest-badge badge-id player))
+    
+    ;; Update player badge count  
+    (map-set player-badges player {
+      total-badges: (+ (get total-badges player-stats) u1),
+      last-badge-id: badge-id
+    })
+    
+    ;; Update badge counter
+    (var-set badge-counter badge-id)
+    
+    (ok badge-id)
   )
 )
 
@@ -155,4 +174,164 @@
     quest (and (get is-active quest) (< burn-block-height (get expiry-block quest)))
     false
   )
+)
+
+(define-read-only (get-player-badges (player principal))
+  (default-to {total-badges: u0, last-badge-id: u0} (map-get? player-badges player))
+)
+
+(define-read-only (get-badge-counter)
+  (var-get badge-counter)
+)
+
+;; Administrative functions
+(define-public (set-quest-inactive (quest-id uint))
+  (let 
+    (
+      (quest (unwrap! (map-get? quests quest-id) ERR-QUEST-NOT-FOUND))
+    )
+    (asserts! (or (is-eq tx-sender (get creator quest)) (is-eq tx-sender CONTRACT-OWNER)) ERR-UNAUTHORIZED)
+    
+    (map-set quests quest-id (merge quest {
+      is-active: false
+    }))
+    
+    (ok true)
+  )
+)
+
+(define-public (set-contract-uri (new-uri (string-ascii 256)))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (var-set contract-uri new-uri)
+    (ok true)
+  )
+)
+
+;; SIP-009 trait implementations
+(define-read-only (get-last-token-id)
+  (ok (var-get badge-counter))
+)
+
+(define-read-only (get-token-uri (badge-id uint))
+  (if (<= badge-id (var-get badge-counter))
+    (ok (some (var-get contract-uri)))
+    (ok none)
+  )
+)
+
+(define-read-only (get-owner (badge-id uint))
+  (ok (nft-get-owner? quest-badge badge-id))
+)
+
+(define-public (transfer (badge-id uint) (sender principal) (recipient principal))
+  (begin
+    (asserts! (is-eq tx-sender sender) ERR-UNAUTHORIZED)
+    (nft-transfer? quest-badge badge-id sender recipient)
+  )
+)
+
+;; Additional utility functions for enhanced functionality
+
+;; Get quest statistics for analytics
+(define-read-only (get-quest-stats (quest-id uint))
+  (match (map-get? quests quest-id)
+    quest 
+    (ok {
+      creator: (get creator quest),
+      title: (get title quest),
+      current-participants: (get current-participants quest),
+      max-participants: (get max-participants quest),
+      is-active: (get is-active quest),
+      expiry-block: (get expiry-block quest),
+      blocks-remaining: (if (> (get expiry-block quest) burn-block-height) 
+                          (- (get expiry-block quest) burn-block-height) 
+                          u0)
+    })
+    ERR-QUEST-NOT-FOUND
+  )
+)
+
+;; Check if a player has completed a specific quest
+(define-read-only (has-completed-quest (quest-id uint) (player principal))
+  (match (map-get? quest-participants {quest-id: quest-id, player: player})
+    participant (get completed participant)
+    false
+  )
+)
+
+;; Get all player completions for a quest (note: this is a simplified version)
+(define-read-only (get-quest-completion-rate (quest-id uint))
+  (match (map-get? quests quest-id)
+    quest
+    (ok {
+      current-participants: (get current-participants quest),
+      max-participants: (get max-participants quest),
+      completion-percentage: (if (> (get current-participants quest) u0)
+                               (* (/ (get current-participants quest) (get max-participants quest)) u100)
+                               u0)
+    })
+    ERR-QUEST-NOT-FOUND
+  )
+)
+
+;; Emergency function to pause all quest creation (contract owner only)
+(define-data-var contract-paused bool false)
+
+(define-public (set-contract-paused (paused bool))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (var-set contract-paused paused)
+    (ok paused)
+  )
+)
+
+(define-read-only (is-contract-paused)
+  (var-get contract-paused)
+)
+
+;; Enhanced quest creation with pause check
+(define-public (create-quest-enhanced
+  (title (string-ascii 100))
+  (description (string-ascii 500))
+  (reward-amount uint)
+  (max-participants uint)
+  (duration-blocks uint)
+  (minimum-blocks-active uint)
+)
+  (begin
+    (asserts! (not (var-get contract-paused)) ERR-QUEST-INACTIVE)
+    (asserts! (>= duration-blocks minimum-blocks-active) ERR-INVALID-INPUT)
+    
+    ;; Call the original create-quest function
+    (create-quest title description reward-amount max-participants duration-blocks)
+  )
+)
+
+;; Batch operation to get multiple quest info (limited to prevent gas issues)
+(define-read-only (get-recent-quests (limit uint))
+  (let
+    (
+      (counter (var-get quest-counter))
+      (start-id (if (> counter limit) (- counter limit) u1))
+    )
+    (ok {
+      total-quests: counter,
+      start-id: start-id,
+      end-id: counter
+    })
+  )
+)
+
+;; Contract metadata and version info
+(define-read-only (get-contract-info)
+  (ok {
+    name: "QuestBoard",
+    version: "1.0.0",
+    total-quests: (var-get quest-counter),
+    total-badges: (var-get badge-counter),
+    contract-owner: CONTRACT-OWNER,
+    is-paused: (var-get contract-paused),
+    metadata-uri: (var-get contract-uri)
+  })
 )
