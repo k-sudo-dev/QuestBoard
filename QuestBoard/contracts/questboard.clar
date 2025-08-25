@@ -1,4 +1,4 @@
-;; QuestBoard Smart Contract - Commit 2: Quest Participation and Completion
+;; QuestBoard Smart Contract - Commit 3: NFT Badge System and Player Statistics
 ;; A community board for game developers to post quests and reward players with NFT badges
 
 ;; Define SIP-009 NFT trait locally
@@ -54,6 +54,11 @@
 (define-map quest-participants 
   {quest-id: uint, player: principal}
   {completed: bool, completion-block: uint}
+)
+
+(define-map player-badges
+  principal
+  {total-badges: uint, last-badge-id: uint}
 )
 
 ;; public functions
@@ -121,6 +126,8 @@
       (quest (unwrap! (map-get? quests quest-id) ERR-QUEST-NOT-FOUND))
       (participant-key {quest-id: quest-id, player: player})
       (participant (unwrap! (map-get? quest-participants participant-key) ERR-QUEST-NOT-FOUND))
+      (badge-id (+ (var-get badge-counter) u1))
+      (player-stats (default-to {total-badges: u0, last-badge-id: u0} (map-get? player-badges player)))
     )
     (asserts! (or (is-eq tx-sender (get creator quest)) (is-eq tx-sender CONTRACT-OWNER)) ERR-UNAUTHORIZED)
     (asserts! (get is-active quest) ERR-QUEST-INACTIVE)
@@ -133,7 +140,19 @@
       completion-block: burn-block-height
     })
     
-    (ok true)
+    ;; Mint NFT badge to player
+    (try! (nft-mint? quest-badge badge-id player))
+    
+    ;; Update player badge count  
+    (map-set player-badges player {
+      total-badges: (+ (get total-badges player-stats) u1),
+      last-badge-id: badge-id
+    })
+    
+    ;; Update badge counter
+    (var-set badge-counter badge-id)
+    
+    (ok badge-id)
   )
 )
 
@@ -155,4 +174,12 @@
     quest (and (get is-active quest) (< burn-block-height (get expiry-block quest)))
     false
   )
+)
+
+(define-read-only (get-player-badges (player principal))
+  (default-to {total-badges: u0, last-badge-id: u0} (map-get? player-badges player))
+)
+
+(define-read-only (get-badge-counter)
+  (var-get badge-counter)
 )
