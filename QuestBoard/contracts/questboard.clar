@@ -110,3 +110,117 @@
   )
 )
 
+(define-public (complete-quest (quest-id uint) (player principal))
+  (let 
+    (
+      (quest (unwrap! (map-get? quests quest-id) ERR-QUEST-NOT-FOUND))
+      (participant-key {quest-id: quest-id, player: player})
+      (participant (unwrap! (map-get? quest-participants participant-key) ERR-QUEST-NOT-FOUND))
+      (badge-id (+ (var-get badge-counter) u1))
+    )
+    (asserts! (or (is-eq tx-sender (get creator quest)) (is-eq tx-sender CONTRACT-OWNER)) ERR-UNAUTHORIZED)
+    (asserts! (get is-active quest) ERR-QUEST-INACTIVE)
+    (asserts! (< block-height (get expiry-block quest)) ERR-QUEST-EXPIRED)
+    (asserts! (not (get completed participant)) ERR-ALREADY-COMPLETED)
+    
+    ;; Mark quest as completed for player
+    (map-set quest-participants participant-key {
+      completed: true,
+      completion-block: block-height
+    })
+    
+    ;; Mint NFT badge to player
+    (try! (nft-mint? quest-badge badge-id player))
+    
+    ;; Update player badge count
+    (let 
+      (
+        (player-stats (default-to {total-badges: u0, last-badge-id: u0} 
+                                 (map-get? player-badges player)))
+      )
+      (map-set player-badges player {
+        total-badges: (+ (get total-badges player-stats) u1),
+        last-badge-id: badge-id
+      })
+    )
+    
+    (var-set badge-counter badge-id)
+    (ok badge-id)
+  )
+)
+
+(define-public (deactivate-quest (quest-id uint))
+  (let 
+    (
+      (quest (unwrap! (map-get? quests quest-id) ERR-QUEST-NOT-FOUND))
+    )
+    (asserts! (or (is-eq tx-sender (get creator quest)) (is-eq tx-sender CONTRACT-OWNER)) ERR-UNAUTHORIZED)
+    
+    (map-set quests quest-id (merge quest {is-active: false}))
+    (ok true)
+  )
+)
+
+(define-public (set-contract-uri (new-uri (string-ascii 256)))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (var-set contract-uri new-uri)
+    (ok true)
+  )
+)
+
+;; read only functions
+(define-read-only (get-quest (quest-id uint))
+  (map-get? quests quest-id)
+)
+
+(define-read-only (get-quest-participant (quest-id uint) (player principal))
+  (map-get? quest-participants {quest-id: quest-id, player: player})
+)
+
+(define-read-only (get-player-badges (player principal))
+  (map-get? player-badges player)
+)
+
+(define-read-only (get-quest-count)
+  (var-get quest-counter)
+)
+
+(define-read-only (get-badge-count)
+  (var-get badge-counter)
+)
+
+(define-read-only (get-contract-uri)
+  (var-get contract-uri)
+)
+
+(define-read-only (is-quest-active (quest-id uint))
+  (match (map-get? quests quest-id)
+    quest (and (get is-active quest) (< block-height (get expiry-block quest)))
+    false
+  )
+)
+
+;; SIP009 NFT trait implementation
+(define-read-only (get-last-token-id)
+  (ok (var-get badge-counter))
+)
+
+(define-read-only (get-token-uri (badge-id uint))
+  (if (<= badge-id (var-get badge-counter))
+    (ok (some (concat (var-get contract-uri) (uint-to-ascii badge-id))))
+    (ok none)
+  )
+)
+
+(define-read-only (get-owner (badge-id uint))
+  (ok (nft-get-owner? quest-badge badge-id))
+)
+
+(define-public (transfer (badge-id uint) (sender principal) (recipient principal))
+  (begin
+    (asserts! (is-eq tx-sender sender) ERR-UNAUTHORIZED)
+    (nft-transfer? quest-badge badge-id sender recipient)
+  )
+)
+
